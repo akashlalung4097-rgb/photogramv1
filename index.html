@@ -275,9 +275,9 @@ body:not(.reduce-motion) .panel h3{
     <form id="userPhotoForm" novalidate>
       <div class="community-upload-grid">
         <div class="field full"><label for="userPhotoFile">Choose photo *</label><input id="userPhotoFile" name="photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif" required><img id="userPhotoPreview" class="user-upload-preview" alt="Selected photo preview"></div>
-        <div class="field full"><label for="userPhotoPrompt">Text prompt / photo description *</label><textarea id="userPhotoPrompt" name="prompt" minlength="5" maxlength="1500" placeholder="Describe the image you want to generate..." required></textarea><span class="community-note">Generate an image from your text prompt, or choose an existing photo. Every submission is reviewed by the owner before publication.</span><div class="admin-actions" style="margin-top:12px"><button class="secondary" type="button" id="generateAiImage">✨ Generate AI Image</button></div></div>
+        <div class="field full"><label for="userPhotoPrompt">Text prompt / photo description *</label><textarea id="userPhotoPrompt" name="prompt" minlength="5" maxlength="1500" placeholder="Describe the image you want to generate..." required></textarea><span class="community-note">Generate an image from your text prompt, or choose an existing photo. Every submission is reviewed by the owner before publication.</span><div class="admin-actions" style="margin-top:12px"><button class="secondary" type="button" id="generateAiImage">✨ Generate AI Image</button><button class="danger" type="button" id="cancelAiGeneration" style="display:none">Cancel Generation</button><button class="secondary" type="button" id="downloadGeneratedAiImage" style="display:none">Download AI Image</button></div></div>
       </div>
-      <div class="admin-actions" style="margin-top:16px"><button class="primary" type="submit" id="submitUserPhoto">Submit Photo for Review</button><button class="secondary" type="reset" id="resetUserPhoto">Clear</button></div>
+      <div class="admin-actions" style="margin-top:16px"><button class="primary" type="submit" id="submitUserPhoto">Submit Photo for Review</button><button class="secondary" type="reset" id="resetUserPhoto">Clear</button><button class="danger" type="button" id="cancelPhotoUpload" style="display:none">Cancel Upload</button></div>
       <p class="community-note" id="userPhotoStatus" role="status" aria-live="polite"></p>
     </form>
   </div>
@@ -420,6 +420,9 @@ const SUBMISSIONS_TABLE='photo_submissions';
 const SUBMISSIONS_BUCKET='photogram-submissions';
 let userSubmissions=[];
 let generatedImageFile=null;
+let aiGenerationController=null;
+let uploadInProgress=false;
+let uploadCancelRequested=false;
 const CLOUD_ENABLED=!SUPABASE_URL.includes('YOUR_PROJECT') &&
                     !SUPABASE_PUBLISHABLE_KEY.includes('YOUR_SUPABASE_PUBLISHABLE_KEY');
 const sbClient=(CLOUD_ENABLED && typeof window.supabase?.createClient==='function')?window.supabase.createClient(SUPABASE_URL,SUPABASE_PUBLISHABLE_KEY):null;
@@ -1034,10 +1037,14 @@ function setupUserUpload(){
   const fileInput=document.getElementById('userPhotoFile');
   const preview=document.getElementById('userPhotoPreview');
   const status=document.getElementById('userPhotoStatus');
+  const cancelGenerationBtn=document.getElementById('cancelAiGeneration');
+  const downloadBtn=document.getElementById('downloadGeneratedAiImage');
+  const cancelUploadBtn=document.getElementById('cancelPhotoUpload');
   if(!form||!fileInput)return;
   fileInput.addEventListener('change',()=>{
     const file=fileInput.files?.[0];
     generatedImageFile=null;
+    if(downloadBtn)downloadBtn.style.display='none';
     if(preview.src.startsWith('blob:'))URL.revokeObjectURL(preview.src);
     if(!file){preview.removeAttribute('src');preview.style.display='none';return;}
     if(!file.type.startsWith('image/')){fileInput.value='';preview.style.display='none';status.textContent='Please choose an image file.';return;}
@@ -1047,9 +1054,43 @@ function setupUserUpload(){
     reader.onerror=()=>{preview.style.display='none';status.textContent='Could not preview this image.';};
     reader.readAsDataURL(file);status.textContent='';
   });
-  form.addEventListener('reset',()=>{setTimeout(()=>{generatedImageFile=null;if(preview.src.startsWith('blob:'))URL.revokeObjectURL(preview.src);preview.removeAttribute('src');preview.style.display='none';status.textContent='';},0)});
+  form.addEventListener('reset',()=>{
+    if(aiGenerationController)aiGenerationController.abort();
+    setTimeout(()=>{
+      generatedImageFile=null;
+      if(preview.src.startsWith('blob:'))URL.revokeObjectURL(preview.src);
+      preview.removeAttribute('src');preview.style.display='none';status.textContent='';
+      if(downloadBtn)downloadBtn.style.display='none';
+      if(cancelGenerationBtn){cancelGenerationBtn.style.display='none';cancelGenerationBtn.disabled=false;}
+    },0);
+  });
   document.getElementById('generateAiImage')?.addEventListener('click',generateAiImage);
+  cancelGenerationBtn?.addEventListener('click',()=>{
+    if(aiGenerationController){
+      cancelGenerationBtn.disabled=true;
+      status.textContent='Canceling AI image generation…';
+      aiGenerationController.abort();
+    }
+  });
+  downloadBtn?.addEventListener('click',downloadGeneratedAiImage);
+  cancelUploadBtn?.addEventListener('click',()=>{
+    if(!uploadInProgress)return;
+    uploadCancelRequested=true;
+    cancelUploadBtn.disabled=true;
+    status.textContent='Canceling photo upload… The current transfer will be cleaned up before submission completes.';
+  });
   form.addEventListener('submit',submitUserPhoto);
+}
+function downloadGeneratedAiImage(){
+  const status=document.getElementById('userPhotoStatus');
+  if(!generatedImageFile){status.textContent='Generate an AI image first to download it.';return;}
+  const url=URL.createObjectURL(generatedImageFile);
+  const link=document.createElement('a');
+  link.href=url;
+  link.download=generatedImageFile.name||`photogramv1-ai-${Date.now()}.png`;
+  document.body.appendChild(link);link.click();link.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1500);
+  status.textContent='AI image download started.';
 }
 async function generateAiImage(){
   const promptText=document.getElementById('userPhotoPrompt')?.value.trim()||'';
@@ -1057,21 +1098,49 @@ async function generateAiImage(){
   const fileInput=document.getElementById('userPhotoFile');
   const preview=document.getElementById('userPhotoPreview');
   const status=document.getElementById('userPhotoStatus');
+  const cancelBtn=document.getElementById('cancelAiGeneration');
+  const downloadBtn=document.getElementById('downloadGeneratedAiImage');
   if(!CLOUD_ENABLED||!sbClient){status.textContent='AI image generation is not configured. Please contact the site owner.';return;}
   if(promptText.length<5||promptText.length>1500){status.textContent='Enter a prompt between 5 and 1,500 characters.';return;}
-  btn.disabled=true;const oldLabel=btn.textContent;btn.textContent='Generating…';status.textContent='Generating your image. This may take a little while…';
+  if(aiGenerationController){status.textContent='AI image generation is already running.';return;}
+  const controller=new AbortController();
+  aiGenerationController=controller;
+  btn.disabled=true;const oldLabel=btn.textContent;btn.textContent='Generating…';
+  if(cancelBtn){cancelBtn.style.display='inline-flex';cancelBtn.disabled=false;}
+  if(downloadBtn)downloadBtn.style.display='none';
+  status.textContent='Generating your image. You can cancel this request at any time…';
   try{
-    const {data,error}=await sbClient.functions.invoke('generate-image',{body:{prompt:promptText}});
-    if(error){let message=error.message||'The AI image service could not complete the request.';try{const detail=await error.context?.json?.();if(detail?.error)message=detail.error;}catch{}throw new Error(message);}
+    const {data:sessionData}=await sbClient.auth.getSession();
+    if(controller.signal.aborted)throw new DOMException('AI image generation canceled.','AbortError');
+    const accessToken=sessionData?.session?.access_token||SUPABASE_PUBLISHABLE_KEY;
+    const response=await fetch(`${SUPABASE_URL}/functions/v1/generate-image`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':SUPABASE_PUBLISHABLE_KEY,'Authorization':`Bearer ${accessToken}`},
+      body:JSON.stringify({prompt:promptText}),
+      signal:controller.signal
+    });
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok)throw new Error(data?.error||`The AI image service returned HTTP ${response.status}.`);
     if(!data?.b64_json)throw new Error(data?.error||'The AI service returned no image. Please try a different prompt.');
     const binary=atob(data.b64_json);const bytes=new Uint8Array(binary.length);for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
     const blob=new Blob([bytes],{type:data.mime_type||'image/png'});
     if(blob.size>10*1024*1024)throw new Error('The generated image is larger than 10 MB. Please try again.');
     generatedImageFile=new File([blob],`photogramv1-ai-${Date.now()}.png`,{type:blob.type});
     fileInput.value='';if(preview.src.startsWith('blob:'))URL.revokeObjectURL(preview.src);preview.src=URL.createObjectURL(generatedImageFile);preview.style.display='block';
-    status.textContent='AI image generated successfully. Click “Submit Photo for Review” to send it to the owner.';
-  }catch(error){console.error('AI image generation failed:',error);status.textContent='AI image generation failed: '+(error?.message||'Please check the AI service setup and try again.');}
-  finally{btn.disabled=false;btn.textContent=oldLabel;}
+    if(downloadBtn)downloadBtn.style.display='inline-flex';
+    status.textContent='AI image generated successfully. You can download it or click “Submit Photo for Review” to send it to the owner.';
+  }catch(error){
+    if(error?.name==='AbortError'){
+      status.textContent='AI image generation canceled.';
+    }else{
+      console.error('AI image generation failed:',error);
+      status.textContent='AI image generation failed: '+(error?.message||'Please check the AI service setup and try again.');
+    }
+  }finally{
+    if(aiGenerationController===controller)aiGenerationController=null;
+    btn.disabled=false;btn.textContent=oldLabel;
+    if(cancelBtn){cancelBtn.style.display='none';cancelBtn.disabled=false;}
+  }
 }
 async function submitUserPhoto(event){
   event.preventDefault();
@@ -1079,30 +1148,56 @@ async function submitUserPhoto(event){
   const promptText=document.getElementById('userPhotoPrompt')?.value.trim()||'';
   const btn=document.getElementById('submitUserPhoto');
   const status=document.getElementById('userPhotoStatus');
+  const cancelBtn=document.getElementById('cancelPhotoUpload');
+  const clearBtn=document.getElementById('resetUserPhoto');
+  if(uploadInProgress)return;
   if(!CLOUD_ENABLED||!sbClient){status.textContent='Cloud uploads are not configured. Please try again later or contact the site owner.';return;}
   if(!file){status.textContent='Please choose a photo first.';return;}
   if(!file.type.startsWith('image/')){status.textContent='Only image files are accepted.';return;}
   if(file.size>10*1024*1024){status.textContent='Image must be 10 MB or smaller.';return;}
   if(promptText.length<5||promptText.length>1500){status.textContent='Please enter a prompt/description between 5 and 1,500 characters.';return;}
-  btn.disabled=true;const oldLabel=btn.textContent;btn.textContent='Submitting…';status.textContent='Uploading your photo securely…';
+  uploadInProgress=true;uploadCancelRequested=false;
+  btn.disabled=true;const oldLabel=btn.textContent;btn.textContent='Submitting…';
+  if(cancelBtn){cancelBtn.style.display='inline-flex';cancelBtn.disabled=false;}
+  if(clearBtn)clearBtn.disabled=true;
+  status.textContent='Uploading your photo securely…';
   const id=uid();
   const path='submissions/'+id+'.'+fileExtension(file);
   let fileUploaded=false;
+  let rowCreated=false;
   try{
     const {error:uploadError}=await sbClient.storage.from(SUBMISSIONS_BUCKET).upload(path,file,{cacheControl:'3600',contentType:file.type,upsert:false});
     if(uploadError)throw uploadError;
     fileUploaded=true;
+    if(uploadCancelRequested){
+      await sbClient.storage.from(SUBMISSIONS_BUCKET).remove([path]);fileUploaded=false;
+      status.textContent='Upload canceled. Your photo was not submitted.';
+      return;
+    }
     const payload={id,submitter_name:'Anonymous',prompt:promptText,storage_path:path,created:Date.now(),status:'pending',media_type:'image'};
     const {error:rowError}=await sbClient.from(SUBMISSIONS_TABLE).insert(payload);
     if(rowError)throw rowError;
+    rowCreated=true;
+    if(uploadCancelRequested){
+      await sbClient.from(SUBMISSIONS_TABLE).delete().eq('id',id);rowCreated=false;
+      await sbClient.storage.from(SUBMISSIONS_BUCKET).remove([path]);fileUploaded=false;
+      status.textContent='Upload canceled. Your photo was not submitted.';
+      return;
+    }
     document.getElementById('userPhotoForm').reset();
-    status.textContent='Thank you! Your photo and prompt were submitted for owner review. It will appear in the public gallery only if approved.';
+    setTimeout(()=>{if(!uploadInProgress)status.textContent='Thank you! Your photo and prompt were submitted for owner review. It will appear in the public gallery only if approved.';},0);
     toast('Photo submitted for review');
   }catch(error){
     console.error('Public photo submission failed:',error);
+    if(rowCreated){try{await sbClient.from(SUBMISSIONS_TABLE).delete().eq('id',id);}catch(cleanupError){console.warn('Could not remove canceled submission row:',cleanupError)}}
     if(fileUploaded){try{await sbClient.storage.from(SUBMISSIONS_BUCKET).remove([path]);}catch(cleanupError){console.warn('Could not remove incomplete submission file:',cleanupError)}}
-    status.textContent='Submission failed: '+(error?.message||'check the Supabase upload setup SQL, then try again.');
-  }finally{btn.disabled=false;btn.textContent=oldLabel;}
+    status.textContent=uploadCancelRequested?'Upload canceled. Any uploaded file was cleaned up where possible.':'Submission failed: '+(error?.message||'check the Supabase upload setup SQL, then try again.');
+  }finally{
+    uploadInProgress=false;uploadCancelRequested=false;
+    if(cancelBtn){cancelBtn.style.display='none';cancelBtn.disabled=false;}
+    if(clearBtn)clearBtn.disabled=false;
+    btn.disabled=false;btn.textContent=oldLabel;
+  }
 }
 async function renderUserSubmissions(){
   const box=document.getElementById('userSubmissionList');
