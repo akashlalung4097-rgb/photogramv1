@@ -681,6 +681,9 @@ function sharedCommentFromRow(row){
     text:String(row.body||''),
     date:row.created_at?new Date(row.created_at).getTime():Date.now(),
     edited:row.edited_at?new Date(row.edited_at).getTime():null,
+    adminReply:String(row.admin_reply||''),
+    adminRepliedAt:row.admin_replied_at?new Date(row.admin_replied_at).getTime():null,
+    adminRepliedBy:String(row.admin_replied_by||''),
     shared:true
   };
 }
@@ -693,7 +696,7 @@ function mergePhotoComments(p,cloudRows){
 async function loadSharedCommentsForPhoto(p){
   if(!CLOUD_ENABLED||!sbClient||!p)return;
   const {data:rows,error}=await sbClient.from(COMMENTS_TABLE)
-    .select('id,photo_id,author_id,name,body,created_at,edited_at')
+    .select('id,photo_id,author_id,name,body,created_at,edited_at,admin_reply,admin_replied_at,admin_replied_by')
     .eq('photo_id',p.id).order('created_at',{ascending:true});
   if(error){
     sharedCommentsLoadError=error.message||'Could not load cloud comments.';
@@ -713,7 +716,8 @@ function renderComments(p){
     const editButton=canEdit?`<button class="secondary comment-edit" data-comment="${esc(c.id)}" style="padding:5px 8px;font-size:11px">Edit</button>`:'';
     const deleteButton=canDelete?`<button class="danger comment-delete" data-comment="${esc(c.id)}" style="padding:5px 8px;font-size:11px">Delete</button>`:'';
     const controls=(editButton||deleteButton)?`<div style="display:flex;gap:6px;margin-top:7px">${editButton}${deleteButton}</div>`:'';
-    return `<div style="padding:9px 0;border-bottom:1px solid var(--line)"><b>${esc(c.name||'Anonymous')}</b><small style="color:var(--muted);margin-left:7px">${new Date(c.date||Date.now()).toLocaleString()}${c.edited?' · edited':''}</small><div style="margin-top:3px">${esc(c.text)}</div>${controls}</div>`;
+    const reply=c.shared&&c.adminReply?`<div class="admin-comment-reply" style="margin:9px 0 2px 12px;padding:10px 12px;border-left:3px solid #6c63ff;background:var(--panel);border-radius:0 9px 9px 0"><b style="font-size:12px">Photogramv1 Admin replied</b><div style="margin-top:4px;white-space:pre-wrap">${esc(c.adminReply)}</div><small style="display:block;color:var(--muted);margin-top:5px">${c.adminRepliedAt?new Date(c.adminRepliedAt).toLocaleString():''}</small></div>`:'';
+    return `<div style="padding:9px 0;border-bottom:1px solid var(--line)"><b>${esc(c.name||'Anonymous')}</b><small style="color:var(--muted);margin-left:7px">${new Date(c.date||Date.now()).toLocaleString()}${c.edited?' · edited':''}</small><div style="margin-top:3px;white-space:pre-wrap">${esc(c.text)}</div>${reply}${controls}</div>`;
   }).join(''):'<div style="color:var(--muted);font-size:13px">No comments yet.</div>';
   document.querySelectorAll('.comment-edit').forEach(btn=>btn.onclick=()=>editComment(currentList[currentIndex]?.id,btn.dataset.comment));
   document.querySelectorAll('.comment-delete').forEach(btn=>btn.onclick=()=>deleteComment(currentList[currentIndex]?.id,btn.dataset.comment));
@@ -732,7 +736,7 @@ async function addComment(){
       if(!sbClient)throw new Error('Cloud service is unavailable. Refresh and try again.');
       const payload={id:comment.id,photo_id:p.id,author_id:visitor.userId,name,body:text};
       const {data:row,error}=await sbClient.from(COMMENTS_TABLE)
-        .insert(payload).select('id,photo_id,author_id,name,body,created_at,edited_at').single();
+        .insert(payload).select('id,photo_id,author_id,name,body,created_at,edited_at,admin_reply,admin_replied_at,admin_replied_by').single();
       if(error)throw new Error(error.message||'Could not save comment to the cloud.');
       comment=sharedCommentFromRow(row);
       sharedComments=[comment,...sharedComments.filter(c=>c.id!==comment.id)];
@@ -1417,7 +1421,7 @@ async function renderAdminComments(){
     }else{
       box.innerHTML='<div class="empty">Loading visitor comments…</div>';
       const {data:rows,error}=await sbClient.from(COMMENTS_TABLE)
-        .select('id,photo_id,author_id,name,body,created_at,edited_at')
+        .select('id,photo_id,author_id,name,body,created_at,edited_at,admin_reply,admin_replied_at,admin_replied_by')
         .order('created_at',{ascending:false}).limit(500);
       if(error){
         sharedCommentsLoadError=error.message||'Cloud comment inbox could not load.';
@@ -1435,10 +1439,44 @@ async function renderAdminComments(){
   const localHtml=legacyRows.map(({p,c})=>`<div class="report"><b>${esc(c.name||'Anonymous')}</b> · <span style="color:var(--muted)">${esc(p.name)}</span><div style="margin-top:5px">${esc(c.text)}</div><small>${new Date(c.date||Date.now()).toLocaleString()} · Browser-local comment</small><div class="admin-actions" style="margin-top:8px"><button class="secondary" onclick="editComment('${esc(p.id)}','${esc(c.id)}')">Edit</button><button class="danger" onclick="deleteComment('${esc(p.id)}','${esc(c.id)}')">Delete</button></div></div>`).join('');
   const cloudHtml=sharedComments.map(c=>{
     const p=photos.find(x=>x.id===c.photoId);
-    return `<div class="report"><b>${esc(c.name||'Anonymous')}</b> · <span style="color:var(--muted)">${esc(p?.name||'Photo ID: '+c.photoId)}</span><div style="margin-top:5px">${esc(c.text)}</div><small>${new Date(c.date||Date.now()).toLocaleString()} · Shared visitor comment${c.edited?' · edited':''}</small><div class="admin-actions" style="margin-top:8px"><button class="secondary" onclick="editSharedComment('${esc(c.id)}')">Edit</button><button class="danger" onclick="deleteSharedComment('${esc(c.id)}')">Delete</button></div></div>`;
+    const safeId=esc(c.id);
+    const replied=c.adminReply?`<div style="margin-top:10px;padding:10px 12px;border-left:3px solid #6c63ff;background:var(--panel);border-radius:0 9px 9px 0"><b>Current admin reply</b><div style="white-space:pre-wrap;margin-top:4px">${esc(c.adminReply)}</div><small style="color:var(--muted)">${c.adminRepliedAt?new Date(c.adminRepliedAt).toLocaleString():''}</small></div>`:'';
+    return `<div class="report"><b>${esc(c.name||'Anonymous')}</b> · <span style="color:var(--muted)">${esc(p?.name||'Photo ID: '+c.photoId)}</span><div style="margin-top:5px;white-space:pre-wrap">${esc(c.text)}</div><small>${new Date(c.date||Date.now()).toLocaleString()} · Shared visitor comment${c.edited?' · edited':''}</small>${replied}<div style="margin-top:12px"><label for="admin-reply-${safeId}" style="display:block;margin-bottom:5px;font-weight:600">Reply to this visitor</label><textarea id="admin-reply-${safeId}" data-admin-reply-input="${safeId}" maxlength="1000" rows="3" placeholder="Write a reply from Photogramv1 Admin..." style="width:100%;resize:vertical">${esc(c.adminReply||'')}</textarea><div class="admin-actions" style="margin-top:8px"><button class="primary" data-admin-reply-button="${safeId}">${c.adminReply?'Update Reply':'Send Reply'}</button><button class="secondary" onclick="editSharedComment('${safeId}')">Edit Comment</button><button class="danger" onclick="deleteSharedComment('${safeId}')">Delete Comment</button></div></div></div>`;
   }).join('');
   const hasRows=legacyRows.length||sharedComments.length;
   box.innerHTML=cloudStatus+(hasRows?cloudHtml+localHtml:(cloudStatus?'':'<div class="empty">No visitor comments received yet.</div>'));
+  box.querySelectorAll('[data-admin-reply-button]').forEach(button=>{
+    button.addEventListener('click',()=>replySharedComment(button.dataset.adminReplyButton));
+  });
+}
+async function replySharedComment(commentId){
+  if(!isAdmin()||!CLOUD_ENABLED||!sbClient)return toast('Only the signed-in website owner can reply to visitor comments.');
+  const input=document.getElementById('admin-reply-'+String(commentId));
+  if(!input)return toast('Reply box not found. Refresh the Comments inbox.');
+  const reply=String(input.value||'').trim();
+  if(!reply)return toast('Write an admin reply first.');
+  if(reply.length>1000)return toast('Reply must be 1,000 characters or fewer.');
+  const button=Array.from(document.querySelectorAll('[data-admin-reply-button]')).find(el=>el.dataset.adminReplyButton===String(commentId));
+  if(button){button.disabled=true;button.textContent='Saving reply…';}
+  try{
+    const {data:row,error}=await sbClient.from(COMMENTS_TABLE)
+      .update({admin_reply:reply,admin_replied_at:new Date().toISOString(),admin_replied_by:OWNER_EMAIL})
+      .eq('id',commentId)
+      .select('id,photo_id,author_id,name,body,created_at,edited_at,admin_reply,admin_replied_at,admin_replied_by')
+      .single();
+    if(error)throw new Error(error.message||'Could not save the admin reply.');
+    const updated=sharedCommentFromRow(row);
+    sharedComments=sharedComments.map(c=>c.id===commentId?updated:c);
+    photos.forEach(p=>{p.comments=(p.comments||[]).map(c=>c.id===commentId?{...c,...updated}:c)});
+    const active=photos.find(p=>p.id===currentList[currentIndex]?.id);
+    if(active && !document.getElementById('photoModal').classList.contains('hidden'))renderComments(active);
+    await renderAdminComments();
+    toast('Admin reply saved and shown with the visitor comment.');
+  }catch(error){
+    console.error('Admin comment reply failed:',error);
+    toast('Could not save admin reply: '+(error?.message||'check comment SQL setup and owner permissions.'));
+    if(button){button.disabled=false;button.textContent='Try Again';}
+  }
 }
 
 function renderReports(){const r=data.reports||[];document.getElementById('reportList').innerHTML=r.length?r.map(x=>`<div class="report"><b>${esc(x.type)}</b><div>${esc(x.message)}</div><small>${new Date(x.date).toLocaleString()}</small></div>`).join(''):'<div class="empty">No reports.</div>'}
@@ -1657,7 +1695,7 @@ async function bootApp(){
     setTimeout(()=>openPhoto(id),200);
   }
 }
-window.editPhoto=editPhoto;window.deletePhoto=deletePhoto;window.removeCategory=removeCategory;window.editComment=editComment;window.deleteComment=deleteComment;
+window.editPhoto=editPhoto;window.deletePhoto=deletePhoto;window.removeCategory=removeCategory;window.editComment=editComment;window.deleteComment=deleteComment;window.replySharedComment=replySharedComment;
 bootApp();
 </script>
 </body></html>
