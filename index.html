@@ -274,7 +274,7 @@ body:not(.reduce-motion) .panel h3{
     <p class="community-note">Your photo and prompt will be sent to Photogramv1 for review. Approved photos can appear in the public gallery. Please upload only images you own or have permission to share. Maximum file size: 10 MB.</p>
     <form id="userPhotoForm" novalidate>
       <div class="community-upload-grid">
-        <div class="field full"><label for="userPhotoFile">Choose photo *</label><input id="userPhotoFile" name="photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif" required><img id="userPhotoPreview" class="user-upload-preview" alt="Selected photo preview"></div>
+        <div class="field full"><label for="userPhotoFile">Choose photo *</label><input id="userPhotoFile" name="photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif" required><div class="admin-actions" style="margin-top:8px"><button class="secondary" type="button" id="cancelSelectedPhoto">✕ Cancel selected photo</button></div><img id="userPhotoPreview" class="user-upload-preview" alt="Selected photo preview"></div>
         <div class="field full"><label for="userPhotoPrompt">Text prompt / photo description *</label><textarea id="userPhotoPrompt" name="prompt" minlength="5" maxlength="1500" placeholder="Describe the image you want to generate..." required></textarea><span class="community-note">Generate an image from your text prompt, or choose an existing photo. Every submission is reviewed by the owner before publication.</span><div class="admin-actions" style="margin-top:12px"><button class="secondary" type="button" id="generateAiImage">✨ Generate AI Image</button><button class="danger" type="button" id="cancelAiGeneration" style="display:none">Cancel Generation</button><button class="secondary" type="button" id="downloadGeneratedAiImage" style="display:none">Download AI Image</button></div></div>
       </div>
       <div class="admin-actions" style="margin-top:16px"><button class="primary" type="submit" id="submitUserPhoto">Submit Photo for Review</button><button class="secondary" type="reset" id="resetUserPhoto">Clear</button><button class="danger" type="button" id="cancelPhotoUpload" style="display:none">Cancel Upload</button></div>
@@ -1050,7 +1050,17 @@ function setupUserUpload(){
   const cancelGenerationBtn=document.getElementById('cancelAiGeneration');
   const downloadBtn=document.getElementById('downloadGeneratedAiImage');
   const cancelUploadBtn=document.getElementById('cancelPhotoUpload');
+  const cancelSelectedBtn=document.getElementById('cancelSelectedPhoto');
   if(!form||!fileInput)return;
+  const clearSelectedPhoto=()=>{
+    if(uploadInProgress){status.textContent='An upload is running. Use “Cancel Upload” to stop it safely.';return;}
+    fileInput.value='';generatedImageFile=null;
+    if(preview.src.startsWith('blob:'))URL.revokeObjectURL(preview.src);
+    preview.removeAttribute('src');preview.style.display='none';
+    if(downloadBtn)downloadBtn.style.display='none';
+    status.textContent='Selected photo canceled. You can choose another photo.';
+  };
+  cancelSelectedBtn?.addEventListener('click',clearSelectedPhoto);
   fileInput.addEventListener('change',()=>{
     const file=fileInput.files?.[0];
     generatedImageFile=null;
