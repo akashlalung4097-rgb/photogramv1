@@ -707,9 +707,12 @@ function renderComments(p){
   const list=p.comments||[];
   document.getElementById('commentsList').innerHTML=list.length?list.map(c=>{
     const own=c.authorId===visitor.userId;
-    // Shared cloud comments can only be moderated by the authenticated owner.
-    const controls=(isAdmin()||(!c.shared&&own))
-      ? `<div style="display:flex;gap:6px;margin-top:7px"><button class="secondary comment-edit" data-comment="${esc(c.id)}" style="padding:5px 8px;font-size:11px">Edit</button><button class="danger comment-delete" data-comment="${esc(c.id)}" style="padding:5px 8px;font-size:11px">Delete</button></div>`:'';
+    // Visitors may edit only their own legacy/local comments. Deletion is admin-only.
+    const canEdit=isAdmin()||(!c.shared&&own);
+    const canDelete=isAdmin();
+    const editButton=canEdit?`<button class="secondary comment-edit" data-comment="${esc(c.id)}" style="padding:5px 8px;font-size:11px">Edit</button>`:'';
+    const deleteButton=canDelete?`<button class="danger comment-delete" data-comment="${esc(c.id)}" style="padding:5px 8px;font-size:11px">Delete</button>`:'';
+    const controls=(editButton||deleteButton)?`<div style="display:flex;gap:6px;margin-top:7px">${editButton}${deleteButton}</div>`:'';
     return `<div style="padding:9px 0;border-bottom:1px solid var(--line)"><b>${esc(c.name||'Anonymous')}</b><small style="color:var(--muted);margin-left:7px">${new Date(c.date||Date.now()).toLocaleString()}${c.edited?' · edited':''}</small><div style="margin-top:3px">${esc(c.text)}</div>${controls}</div>`;
   }).join(''):'<div style="color:var(--muted);font-size:13px">No comments yet.</div>';
   document.querySelectorAll('.comment-edit').forEach(btn=>btn.onclick=()=>editComment(currentList[currentIndex]?.id,btn.dataset.comment));
@@ -762,13 +765,14 @@ async function editComment(photoId,commentId){
   save();renderComments(p);renderAdminComments();toast('Comment updated');
 }
 async function deleteComment(photoId,commentId){
+  // Enforce admin-only deletion in the UI as well as in Supabase RLS policies.
+  if(!isAdmin())return toast('Only the website admin can delete comments.');
   const p=photos.find(x=>x.id===photoId);if(!p)return;
   const c=(p.comments||[]).find(x=>x.id===commentId);if(!c)return;
   if(c.shared){return deleteSharedComment(commentId);}
-  if(!isAdmin()&&c.authorId!==visitor.userId)return toast('You can delete only your own comment.');
   if(!confirm('Delete this comment?'))return;
   p.comments=(p.comments||[]).filter(x=>x.id!==commentId);
-  save();renderComments(p);renderAdminComments();toast('Comment deleted');
+  save();renderComments(p);await renderAdminComments();toast('Comment deleted');
 }
 async function editSharedComment(commentId){
   if(!isAdmin()||!CLOUD_ENABLED||!sbClient)return toast('Only the signed-in owner can edit shared comments.');
@@ -1417,7 +1421,8 @@ async function renderAdminComments(){
         .order('created_at',{ascending:false}).limit(500);
       if(error){
         sharedCommentsLoadError=error.message||'Cloud comment inbox could not load.';
-        cloudStatus='<div class="empty">Cloud comment inbox is not ready. Run the provided comments SQL setup. <small>'+esc(sharedCommentsLoadError)+'</small></div>';
+        sharedComments=[];
+        cloudStatus='<div class="empty">Cloud comment inbox is not ready. Check that the comments SQL ran in this Supabase project and refresh the schema cache. <small>'+esc(sharedCommentsLoadError)+'</small></div>';
       }else{
         sharedCommentsLoadError='';
         sharedComments=(rows||[]).map(sharedCommentFromRow);
@@ -1433,7 +1438,7 @@ async function renderAdminComments(){
     return `<div class="report"><b>${esc(c.name||'Anonymous')}</b> · <span style="color:var(--muted)">${esc(p?.name||'Photo ID: '+c.photoId)}</span><div style="margin-top:5px">${esc(c.text)}</div><small>${new Date(c.date||Date.now()).toLocaleString()} · Shared visitor comment${c.edited?' · edited':''}</small><div class="admin-actions" style="margin-top:8px"><button class="secondary" onclick="editSharedComment('${esc(c.id)}')">Edit</button><button class="danger" onclick="deleteSharedComment('${esc(c.id)}')">Delete</button></div></div>`;
   }).join('');
   const hasRows=legacyRows.length||sharedComments.length;
-  box.innerHTML=cloudStatus+(hasRows?cloudHtml+localHtml:'<div class="empty">No visitor comments received yet.</div>');
+  box.innerHTML=cloudStatus+(hasRows?cloudHtml+localHtml:(cloudStatus?'':'<div class="empty">No visitor comments received yet.</div>'));
 }
 
 function renderReports(){const r=data.reports||[];document.getElementById('reportList').innerHTML=r.length?r.map(x=>`<div class="report"><b>${esc(x.type)}</b><div>${esc(x.message)}</div><small>${new Date(x.date).toLocaleString()}</small></div>`).join(''):'<div class="empty">No reports.</div>'}
