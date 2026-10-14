@@ -434,7 +434,9 @@ let sharedCommentsLoadError='';
 // This must match the email of the one owner account created in Supabase Auth.
 // Keep it synchronized with photogramv1_security_fix.sql.
 const OWNER_EMAIL='photogram01@gmail.com'.toLowerCase();
-const KEY='photogram_v6',VIS='photogram_visitor_v2',ADMIN_SESSION='photogram_admin_v2';
+const KEY='photogram_v6',VIS='photogram_visitor_v2',ADMIN_SESSION='photogram_admin_v2',ADMIN_LOGIN_AT='photogram_admin_login_at';
+const ADMIN_SESSION_TIMEOUT_MS=10*60*1000;
+let adminAutoLogoutTimer=null;
 const DEFAULT_CATS=['Nature','Travel','Cars','Bikes','Technology','Gaming','Fashion','Animals','Wallpapers','Other'];
 const fallbackImg='data:image/svg+xml;charset=UTF-8,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800"><defs><linearGradient id="g" x1="0" x2="1"><stop stop-color="#14b8ff"/><stop offset=".5" stop-color="#6c63ff"/><stop offset="1" stop-color="#df5cff"/></linearGradient></defs><rect width="100%" height="100%" fill="#090d18"/><circle cx="600" cy="340" r="230" fill="url(#g)" opacity=".5"/><text x="600" y="420" text-anchor="middle" fill="white" font-family="Arial" font-size="72" font-weight="700">photogramv1</text></svg>');
 let data=loadData(),visitor=loadVisitor(),localPhotoBackup=Array.isArray(data.photos)?data.photos.map(x=>({...x,comments:Array.isArray(x.comments)?x.comments:[]})):[],photos=data.photos||[],categories=data.categories||DEFAULT_CATS.slice(),currentList=[],currentIndex=0,zoom=1;
@@ -1282,6 +1284,9 @@ async function login(){
       return;
     }
     cloudSession=authData.session;
+    // Start a fixed 10-minute owner session. Refreshing the page does not extend it.
+    sessionStorage.setItem(ADMIN_LOGIN_AT,String(Date.now()));
+    scheduleAdminAutoLogout();
     document.getElementById('login').classList.remove('open');
     openAdmin();
   }catch(error){
@@ -1296,6 +1301,29 @@ function openAdmin(){
   populateAdmin();
 }
 function closeAdmin(){document.getElementById('adminPanel').classList.remove('open')}
+function clearAdminAutoLogoutTimer(){if(adminAutoLogoutTimer!==null){clearTimeout(adminAutoLogoutTimer);adminAutoLogoutTimer=null;}}
+function scheduleAdminAutoLogout(){
+  clearAdminAutoLogoutTimer();
+  if(!isAdmin())return;
+  const now=Date.now();
+  let loginAt=Number(sessionStorage.getItem(ADMIN_LOGIN_AT)||0);
+  // For an existing authenticated owner session during the first visit after this update,
+  // start the 10-minute timer now. Thereafter reloads preserve the original login time.
+  if(!Number.isFinite(loginAt)||loginAt<=0||loginAt>now+5000){loginAt=now;sessionStorage.setItem(ADMIN_LOGIN_AT,String(loginAt));}
+  const remaining=ADMIN_SESSION_TIMEOUT_MS-(now-loginAt);
+  if(remaining<=0){void expireAdminSession();return;}
+  adminAutoLogoutTimer=setTimeout(()=>{adminAutoLogoutTimer=null;void expireAdminSession();},remaining);
+}
+async function expireAdminSession(){
+  clearAdminAutoLogoutTimer();
+  sessionStorage.removeItem(ADMIN_LOGIN_AT);
+  sessionStorage.removeItem(ADMIN_SESSION);
+  try{if(CLOUD_ENABLED&&sbClient)await sbClient.auth.signOut();}catch(error){console.warn('Automatic admin sign-out failed:',error);}
+  cloudSession=null;
+  closeAdmin();
+  document.getElementById('login')?.classList.remove('open');
+  toast('Admin session expired after 10 minutes. Please log in again.');
+}
 function isAdmin(){return !!(CLOUD_ENABLED&&sbClient&&cloudSession&&String(cloudSession.user?.email||'').toLowerCase()===OWNER_EMAIL)}
 function requireAdmin(){return isAdmin()}
 function populateAdmin(){fillCatSelect();renderAdminPhotos();renderAdminCats();renderReports();renderAdminComments();renderUserSubmissions();updateStats();renderEarnings();renderUsersTraffic();const s=data.settings||{};document.getElementById('siteName').value=s.siteName||'photogramv1';document.getElementById('siteEmail').value=s.email||'';document.getElementById('siteInstagram').value=s.instagram||'';document.getElementById('siteHero').value=s.hero||'';document.getElementById('adsensePublisher').value=s.adsensePublisher||'';document.getElementById('adsenseSlot').value=s.adsenseSlot||'';document.getElementById('customCss').value=s.customCss||'';document.getElementById('textAnimation').checked=s.textAnimation!==false}
@@ -1615,7 +1643,10 @@ function tabs(){document.querySelectorAll('.menu button').forEach(b=>b.onclick=(
 function bootAdmin(){
   document.getElementById('adminClose').onclick=closeAdmin;
   document.getElementById('adminLogout').onclick=async()=>{
-    if(CLOUD_ENABLED&&sbClient)await sbClient.auth.signOut();
+    clearAdminAutoLogoutTimer();
+    sessionStorage.removeItem(ADMIN_LOGIN_AT);
+    try{if(CLOUD_ENABLED&&sbClient)await sbClient.auth.signOut();}
+    catch(error){console.warn('Manual admin sign-out failed:',error);}
     sessionStorage.removeItem(ADMIN_SESSION);cloudSession=null;closeAdmin();toast('Logged out');
   };
   document.getElementById('savePhoto').onclick=savePhoto;
@@ -1642,7 +1673,15 @@ function bootAdmin(){
     sbClient.auth.onAuthStateChange((event,session)=>{
       const email=String(session?.user?.email||'').toLowerCase();
       cloudSession=(session&&email===OWNER_EMAIL)?session:null;
-      if(!cloudSession)closeAdmin();
+      if(cloudSession){
+        // Keep the original 10-minute deadline across token refresh events.
+        if(event==='SIGNED_IN'&&!sessionStorage.getItem(ADMIN_LOGIN_AT))sessionStorage.setItem(ADMIN_LOGIN_AT,String(Date.now()));
+        scheduleAdminAutoLogout();
+      }else{
+        clearAdminAutoLogoutTimer();
+        sessionStorage.removeItem(ADMIN_LOGIN_AT);
+        closeAdmin();
+      }
     });
   }
 }
